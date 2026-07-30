@@ -786,28 +786,38 @@ function renderHistTable(){
 /* ---------- CUENTAS Y PRESUPUESTOS ---------- */
 function renderCycle(){
   const box = document.getElementById('cycleBox');
-  const label = periodStartDay === 1 ? 'Día 1 (mes calendario normal)' : 'Día ' + periodStartDay + ' de cada mes';
+  const pk = currentMonthKey();
+  const rangeLabel = monthLabel(pk); // "22 jul – 21 ago 2026" (o "Julio 2026" si periodStartDay es 1)
+  const editLabel = periodStartDay === 1 ? 'Elegir fecha de inicio' : 'Cambiar fecha de inicio ✎';
   box.innerHTML = `
-    <div class="budget-top"><span>📅 Tu mes de gastos empieza el</span><button class="budget-edit" id="cycleEditBtn">${label} ✎</button></div>
-    <div class="budget-sub">Ej: si tu mes va del 22 al 21, pon 22. Todo (filtro de mes, reportes y presupuestos) se ajusta a este ciclo.</div>
+    <div class="budget-top"><span>📅 Ciclo actual</span><button class="budget-edit" id="cycleEditBtn">${editLabel}</button></div>
+    <div class="budget-sub" style="font-size:13px;color:var(--paper);">${rangeLabel}</div>
+    <div class="budget-sub">Ej: si tu ciclo va del 22 de julio al 22 de agosto, elige el 22 de julio como fecha de inicio. El ciclo se repite cada mes con ese mismo día — filtro de mes, reportes y presupuestos se ajustan solos.</div>
   `;
   document.getElementById('cycleEditBtn').addEventListener('click', (ev)=> editCycleDay(ev.target));
 }
 function editCycleDay(btn){
   const input = document.createElement('input');
-  input.type = 'number'; input.min = 1; input.max = 28; input.className = 'edit-num'; input.value = periodStartDay;
+  input.type = 'date'; input.className = 'edit-date';
+  const today = new Date();
+  const day = periodStartDay === 1 ? today.getDate() : periodStartDay;
+  const defaultDate = new Date(today.getFullYear(), today.getMonth(), Math.min(day,28));
+  input.value = defaultDate.toISOString().slice(0,10);
   btn.replaceWith(input); input.focus();
   const commit = ()=>{
-    let val = Number(input.value) || 1;
-    if(val < 1) val = 1; if(val > 28) val = 28;
-    periodStartDay = val;
-    saveSettings();
-    populateMonthOptions();
-    applyFilter();
+    if(input.value){
+      const d = new Date(input.value + 'T12:00:00');
+      let val = d.getDate();
+      if(val > 28) val = 28; // evitar problemas con meses cortos (febrero)
+      periodStartDay = val;
+      saveSettings();
+      populateMonthOptions();
+      applyFilter();
+    }
     renderCycle();
   };
-  input.addEventListener('blur', commit);
-  input.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); commit(); } });
+  input.addEventListener('change', commit);
+  input.addEventListener('blur', ()=>{ if(document.body.contains(input)) renderCycle(); });
 }
 
 function renderAccountsView(){
