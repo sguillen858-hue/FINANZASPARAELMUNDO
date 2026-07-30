@@ -197,6 +197,10 @@
 
   <div id="accountsView">
     <div class="chart-card">
+      <h3>Ciclo de tu presupuesto</h3>
+      <div id="cycleBox"></div>
+    </div>
+    <div class="chart-card">
       <h3>Saldo en tiempo real por cuenta</h3>
       <div id="accountsList"></div>
       <div class="acct-hint">Toca un saldo para corregirlo manualmente (por ejemplo, para fijar cuánto tienes hoy).</div>
@@ -208,6 +212,10 @@
     <div class="chart-card">
       <h3>Presupuestos por categoría</h3>
       <div id="categoryBudgetsBox"></div>
+    </div>
+    <div class="chart-card">
+      <h3>Cierre de ciclo</h3>
+      <div id="closeCycleBox"></div>
     </div>
   </div>
 </div>
@@ -239,20 +247,38 @@ let selectedMonth = 'all';
 let activeTab = 'chat';
 let trendChartInst = null, catChartInst = null;
 let sortKey = 'timestamp', sortDir = -1;
+let periodStartDay = 1; // 1 = mes calendario normal; ej. 22 = ciclo del 22 al 21
 
 const chatEl = document.getElementById('chat');
 const money = n => new Intl.NumberFormat('es-CO', {style:'currency', currency:'COP', maximumFractionDigits:0}).format(n||0);
-const getMonthKey = ts => { const d = new Date(ts); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); };
+const getMonthKey = ts => {
+  const d = new Date(ts);
+  let y = d.getFullYear(), m = d.getMonth();
+  if(d.getDate() < periodStartDay){ m -= 1; if(m < 0){ m = 11; y -= 1; } }
+  return y+'-'+String(m+1).padStart(2,'0');
+};
 const currentMonthKey = () => getMonthKey(Date.now());
 const monthLabel = key => {
-  const [y,m] = key.split('-');
-  const d = new Date(Number(y), Number(m)-1, 1);
-  const label = d.toLocaleDateString('es-CO', {month:'long', year:'numeric'});
-  return label.charAt(0).toUpperCase() + label.slice(1);
+  const [y,m] = key.split('-').map(Number);
+  if(periodStartDay <= 1){
+    const d = new Date(y, m-1, 1);
+    const label = d.toLocaleDateString('es-CO', {month:'long', year:'numeric'});
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  }
+  const start = new Date(y, m-1, periodStartDay);
+  const end = new Date(y, m, periodStartDay-1);
+  const fmt = dt => dt.toLocaleDateString('es-CO', {day:'2-digit', month:'short'});
+  return fmt(start) + ' – ' + fmt(end) + ' ' + end.getFullYear();
 };
+function loadSettings(){
+  try{ const raw = localStorage.getItem('settings-data'); const s = raw ? JSON.parse(raw) : {}; periodStartDay = (s.periodStartDay>=1 && s.periodStartDay<=28) ? s.periodStartDay : 1; }
+  catch(e){ periodStartDay = 1; }
+}
+function saveSettings(){ try{ localStorage.setItem('settings-data', JSON.stringify({periodStartDay})); }catch(e){ console.error('No se pudo guardar', e); } }
 
 /* ---------- CARGA / GUARDADO (localStorage, funciona offline) ---------- */
 function loadAll(){
+  loadSettings();
   try{ const raw = localStorage.getItem('expenses-data'); expenses = raw ? JSON.parse(raw) : []; }catch(e){ expenses = []; }
   expenses.forEach(e=>{
     if(!e.type) e.type = 'gasto';
@@ -272,6 +298,8 @@ function loadAll(){
   try{ const raw = localStorage.getItem('budgets-data'); budgets = raw ? JSON.parse(raw) : {monthly:0, categories:{}}; }catch(e){ budgets = {monthly:0, categories:{}}; }
   if(!budgets.categories) budgets.categories = {};
   BUDGET_DEFS.forEach(b=>{ if(typeof budgets.categories[b.key] !== 'number') budgets.categories[b.key] = 0; });
+  if(!budgets.carryover) budgets.carryover = {};
+  if(!budgets.closedPeriods) budgets.closedPeriods = [];
 
   populateMonthOptions();
   applyFilter();
@@ -756,7 +784,34 @@ function renderHistTable(){
 }
 
 /* ---------- CUENTAS Y PRESUPUESTOS ---------- */
+function renderCycle(){
+  const box = document.getElementById('cycleBox');
+  const label = periodStartDay === 1 ? 'Día 1 (mes calendario normal)' : 'Día ' + periodStartDay + ' de cada mes';
+  box.innerHTML = `
+    <div class="budget-top"><span>📅 Tu mes de gastos empieza el</span><button class="budget-edit" id="cycleEditBtn">${label} ✎</button></div>
+    <div class="budget-sub">Ej: si tu mes va del 22 al 21, pon 22. Todo (filtro de mes, reportes y presupuestos) se ajusta a este ciclo.</div>
+  `;
+  document.getElementById('cycleEditBtn').addEventListener('click', (ev)=> editCycleDay(ev.target));
+}
+function editCycleDay(btn){
+  const input = document.createElement('input');
+  input.type = 'number'; input.min = 1; input.max = 28; input.className = 'edit-num'; input.value = periodStartDay;
+  btn.replaceWith(input); input.focus();
+  const commit = ()=>{
+    let val = Number(input.value) || 1;
+    if(val < 1) val = 1; if(val > 28) val = 28;
+    periodStartDay = val;
+    saveSettings();
+    populateMonthOptions();
+    applyFilter();
+    renderCycle();
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); commit(); } });
+}
+
 function renderAccountsView(){
+  renderCycle();
   const box = document.getElementById('accountsList');
   box.innerHTML = ACCOUNT_NAMES.map(name=>{
     const bal = accounts[name]||0;
@@ -776,30 +831,44 @@ function editAccountBalance(name, btn){
 }
 
 function currentMonthExpenses(){ const mk = currentMonthKey(); return expenses.filter(e=>e.type==='gasto' && getMonthKey(e.timestamp)===mk); }
+function getCarry(periodKey, key){
+  const c = budgets.carryover && budgets.carryover[periodKey];
+  if(!c) return 0;
+  return key === '__monthly__' ? (c.monthly||0) : ((c.categories && c.categories[key]) || 0);
+}
+function getPrevPeriodKey(key){
+  const [y,m] = key.split('-').map(Number);
+  const d = new Date(y, m-2, 1);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+}
 
-function budgetRowHtml(label, key, limit, spent, icon){
-  const hasLimit = limit > 0;
-  const pct = hasLimit ? Math.min(100, Math.round(spent/limit*100)) : 0;
-  const over = hasLimit && spent > limit;
+function budgetRowHtml(label, key, baseLimit, carry, spent, icon){
+  const totalLimit = baseLimit + carry;
+  const hasLimit = totalLimit > 0;
+  const pct = hasLimit ? Math.min(100, Math.round(spent/totalLimit*100)) : 0;
+  const over = hasLimit && spent > totalLimit;
   const barColor = over ? 'var(--rust)' : (pct >= 80 ? 'var(--gold)' : 'var(--teal)');
+  const carryNote = carry > 0 ? ` <span style="color:var(--gold)">(+${money(carry)} trasladado)</span>` : '';
   return `<div class="budget-row">
-    <div class="budget-top"><span>${icon} ${label}</span><button class="budget-edit" data-budget-edit="${key}">${hasLimit ? money(limit) : 'Fijar límite'} ✎</button></div>
+    <div class="budget-top"><span>${icon} ${label}</span><button class="budget-edit" data-budget-edit="${key}">${baseLimit > 0 ? money(baseLimit) : 'Fijar límite'} ✎</button></div>
     ${hasLimit
       ? `<div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
-         <div class="budget-sub ${over?'over':''}">${over ? 'Superado por '+money(spent-limit) : 'Gastado '+money(spent)+' de '+money(limit)}</div>`
-      : `<div class="budget-sub">Gastado este mes: ${money(spent)}</div>`}
+         <div class="budget-sub ${over?'over':''}">${over ? 'Superado por '+money(spent-totalLimit) : 'Gastado '+money(spent)+' de '+money(totalLimit)}${carryNote}</div>`
+      : `<div class="budget-sub">Gastado este mes: ${money(spent)}${carryNote}</div>`}
   </div>`;
 }
 function renderBudgets(){
+  const pk = currentMonthKey();
   const spentTotal = currentMonthExpenses().reduce((s,e)=>s+e.amount,0);
-  document.getElementById('monthlyBudgetBox').innerHTML = budgetRowHtml('Presupuesto de '+monthLabel(currentMonthKey()).toLowerCase(), '__monthly__', budgets.monthly, spentTotal, '💰');
+  document.getElementById('monthlyBudgetBox').innerHTML = budgetRowHtml('Presupuesto de '+monthLabel(pk).toLowerCase(), '__monthly__', budgets.monthly, getCarry(pk,'__monthly__'), spentTotal, '💰');
   document.getElementById('categoryBudgetsBox').innerHTML = BUDGET_DEFS.map(b=>{
     const spent = currentMonthExpenses().filter(e=>e.category===b.key).reduce((s,e)=>s+e.amount,0);
-    return budgetRowHtml(b.label, b.key, budgets.categories[b.key]||0, spent, b.icon);
+    return budgetRowHtml(b.label, b.key, budgets.categories[b.key]||0, getCarry(pk,b.key), spent, b.icon);
   }).join('');
   document.querySelectorAll('[data-budget-edit]').forEach(btn=>{
     btn.addEventListener('click', ()=> editBudget(btn.dataset.budgetEdit, btn));
   });
+  renderCloseCycle();
 }
 function editBudget(key, btn){
   const current = key === '__monthly__' ? budgets.monthly : (budgets.categories[key]||0);
@@ -813,6 +882,94 @@ function editBudget(key, btn){
   };
   input.addEventListener('blur', commit);
   input.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); commit(); } });
+}
+
+/* ---------- CIERRE DE CICLO ---------- */
+function renderCloseCycle(){
+  const box = document.getElementById('closeCycleBox');
+  if(!box) return;
+  const prevKey = getPrevPeriodKey(currentMonthKey());
+  const filtered = expenses.filter(e=>getMonthKey(e.timestamp)===prevKey);
+  const alreadyClosed = (budgets.closedPeriods||[]).includes(prevKey);
+  const spentTotal = filtered.filter(e=>e.type==='gasto').reduce((s,e)=>s+e.amount,0);
+  const items = [{key:'__monthly__', label:'Presupuesto general', limit:budgets.monthly, spent:spentTotal}]
+    .concat(BUDGET_DEFS.map(b=>({key:b.key, label:b.label, limit:budgets.categories[b.key]||0, spent: filtered.filter(e=>e.category===b.key).reduce((s,e)=>s+e.amount,0)})));
+  const rollable = items.filter(it => it.limit > 0 && (it.limit - it.spent) > 0);
+
+  let html = `<div class="budget-sub" style="margin-bottom:8px;">Ciclo anterior: <b style="color:var(--paper)">${monthLabel(prevKey)}</b></div>
+    <button id="downloadReportBtn" class="budget-edit" style="border:1px solid rgba(242,234,216,0.2);border-radius:8px;padding:6px 10px;">⬇️ Descargar informe de ese ciclo</button>`;
+
+  if(filtered.length === 0){
+    html += `<div class="budget-sub" style="margin-top:10px;">Aún no hay movimientos en ese ciclo.</div>`;
+  } else if(alreadyClosed){
+    html += `<div class="budget-sub" style="margin-top:10px;">✅ Este ciclo ya fue cerrado.</div>`;
+  } else {
+    if(rollable.length){
+      html += `<div class="breakdown-title">Sobrante disponible para trasladar al ciclo actual</div>`;
+      rollable.forEach(it=>{
+        const leftover = it.limit - it.spent;
+        html += `<label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:6px;"><input type="checkbox" class="carry-check" data-key="${it.key}" data-amt="${leftover}" checked> ${it.label}: trasladar ${money(leftover)}</label>`;
+      });
+    } else {
+      html += `<div class="budget-sub" style="margin-top:10px;">No quedó sobrante en ningún presupuesto de ese ciclo.</div>`;
+    }
+    html += `<button id="closeCycleBtn" class="budget-edit" style="border:1px solid var(--teal);color:var(--teal);border-radius:8px;padding:6px 10px;margin-top:8px;">✅ Cerrar ciclo y empezar el nuevo</button>`;
+  }
+  box.innerHTML = html;
+
+  document.getElementById('downloadReportBtn').addEventListener('click', ()=> downloadPeriodReport(prevKey));
+  const closeBtn = document.getElementById('closeCycleBtn');
+  if(closeBtn) closeBtn.addEventListener('click', ()=> closeCycle(prevKey));
+}
+
+function closeCycle(prevKey){
+  const nextKey = currentMonthKey();
+  if(!budgets.carryover) budgets.carryover = {};
+  if(!budgets.carryover[nextKey]) budgets.carryover[nextKey] = {monthly:0, categories:{}};
+  document.querySelectorAll('.carry-check:checked').forEach(chk=>{
+    const key = chk.dataset.key;
+    const amt = Number(chk.dataset.amt) || 0;
+    if(key === '__monthly__') budgets.carryover[nextKey].monthly += amt;
+    else budgets.carryover[nextKey].categories[key] = (budgets.carryover[nextKey].categories[key]||0) + amt;
+  });
+  if(!budgets.closedPeriods) budgets.closedPeriods = [];
+  budgets.closedPeriods.push(prevKey);
+  saveBudgets();
+  renderBudgets();
+}
+
+function downloadPeriodReport(periodKey){
+  const filtered = expenses.filter(e=>getMonthKey(e.timestamp)===periodKey);
+  const incomeCat = computeCategoryPaymentBreakdown(filtered, 'ingreso');
+  const expenseCat = computeCategoryPaymentBreakdown(filtered, 'gasto');
+  const totalIncome = Object.values(incomeCat).reduce((s,c)=>s+c.total,0);
+  const totalExpense = Object.values(expenseCat).reduce((s,c)=>s+c.total,0);
+  const catRows = byCat => Object.entries(byCat).sort((a,b)=>b[1].total-a[1].total).map(([c,d])=>`<tr><td>${c}</td><td style="text-align:right">${money(d.total)}</td></tr>`).join('') || '<tr><td colspan="2">Sin movimientos</td></tr>';
+  const histRows = filtered.slice().sort((a,b)=>a.timestamp-b.timestamp).map(e=>{
+    const d = new Date(e.timestamp).toLocaleDateString('es-CO',{day:'2-digit',month:'short',year:'numeric'});
+    return `<tr><td>${d}</td><td>${e.type==='ingreso'?'Ingreso':'Gasto'}</td><td>${e.category}</td><td>${e.payment_method}</td><td>${escapeHtml(e.description||'')}</td><td style="text-align:right">${money(e.amount)}</td></tr>`;
+  }).join('') || '<tr><td colspan="6">Sin movimientos en este ciclo</td></tr>';
+
+  const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Informe ${monthLabel(periodKey)}</title>
+<style>body{font-family:Arial,Helvetica,sans-serif;padding:24px;color:#101826;max-width:760px;margin:0 auto;}
+h1{font-size:20px;margin-bottom:4px;} h2{font-size:15px;margin-top:26px;border-bottom:2px solid #101826;padding-bottom:4px;}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;} td,th{padding:6px 8px;border-bottom:1px solid #ddd;text-align:left;}
+.tot{font-size:16px;font-weight:bold;margin-top:6px;} .muted{color:#777;font-size:12px;}</style>
+</head><body>
+<h1>Informe financiero — ${monthLabel(periodKey)}</h1>
+<div class="muted">Generado el ${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})}</div>
+<p class="tot">Ingresos: ${money(totalIncome)} &nbsp;|&nbsp; Gastos: ${money(totalExpense)} &nbsp;|&nbsp; Balance: ${money(totalIncome-totalExpense)}</p>
+<h2>Ingresos por categoría</h2><table><tr><th>Categoría</th><th>Monto</th></tr>${catRows(incomeCat)}</table>
+<h2>Gastos por categoría</h2><table><tr><th>Categoría</th><th>Monto</th></tr>${catRows(expenseCat)}</table>
+<h2>Historial completo</h2><table><tr><th>Fecha</th><th>Tipo</th><th>Categoría</th><th>Cuenta</th><th>Descripción</th><th>Monto</th></tr>${histRows}</table>
+</body></html>`;
+
+  const blob = new Blob([html], {type:'text/html'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'informe-'+periodKey+'.html';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 3000);
 }
 
 loadAll();
